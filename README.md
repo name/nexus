@@ -4,6 +4,12 @@ Automated tool for monitoring, packaging, and versioning Intune applications. St
 
 > Currently a work in progress.
 
+## Build
+
+```bash
+go build -ldflags="-s -w" -o dist/nexus.exe
+```
+
 ## Screenshots
 
 ![Nexus](./docs/images/nexus.png)
