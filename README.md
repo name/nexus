@@ -63,4 +63,4 @@ This summary contains everything you need to configure the application in Intune
 
 ## Demo
 
-![Nexus Demo](./docs/videos/nexus_demo.mp4)
+![Nexus Demo](./docs/videos/nexus.mp4)
