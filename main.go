@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,6 +20,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 var rootCmd = &cobra.Command{
@@ -43,6 +46,7 @@ const (
 	intuneUtilPath = "C:\\ProgramData\\Nexus\\Tools\\IntuneWinAppUtil.exe"
 	intuneUtilUrl  = "https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool/raw/master/IntuneWinAppUtil.exe"
 	packagesDir    = "C:\\ProgramData\\Nexus\\Packages"
+	downloadsDir   = "C:\\ProgramData\\Nexus\\Downloads"
 )
 
 //go:embed "templates/Install-Script.ps1"
@@ -592,6 +596,11 @@ func getMSIProperty(handle syscall.Handle, property string) (string, error) {
 }
 
 func run_interactive(cmd *cobra.Command, args []string) {
+	if err := ensureNexusDirs(); err != nil {
+		fmt.Printf("Error setting up Nexus directories: %v\n", err)
+		return
+	}
+
 	if err := ensureIntuneUtil(); err != nil {
 		fmt.Printf("Error setting up Intune tools: %v\n", err)
 		return
@@ -610,7 +619,7 @@ func run_interactive(cmd *cobra.Command, args []string) {
 		indent := "    "
 		sectionStyle := lipgloss.NewStyle().Bold(true)
 
-		sanitized_name := sanitizePackageName(finalModel.packageName)
+		sanitized_name := sanitize_package_name(finalModel.packageName)
 		intunewinFile := fmt.Sprintf("%s.intunewin", sanitized_name)
 		installerFile := fmt.Sprintf("%s.%s",
 			sanitized_name,
@@ -703,6 +712,11 @@ func run_interactive(cmd *cobra.Command, args []string) {
 				finalModel.version = version
 			}
 
+			if err := createPackageScripts(finalModel.outputDir, finalModel.packageName, finalModel.installerType); err != nil {
+				fmt.Printf("Error creating package scripts: %v\n", err)
+				return
+			}
+
 			fmt.Printf("%s• Generating IntuneWin package...\n", indent)
 			args := []string{
 				"-c", finalModel.outputDir,
@@ -716,14 +730,51 @@ func run_interactive(cmd *cobra.Command, args []string) {
 				return
 			}
 
+		} else {
+			fmt.Println("\n" + sectionStyle.Render("Actions"))
+			fmt.Printf("%s• Downloading installer file...\n", indent)
+
+			download_path := filepath.Join(downloadsDir, installerFile)
+
+			if err := downloadFile(finalModel.textInput, download_path); err != nil {
+				fmt.Printf("Error downloading installer: %v\n", err)
+				return
+			}
+
+			fmt.Printf("%s• Copying installer to package directory...\n", indent)
+			if err := copyFileToDir(download_path, finalModel.outputDir, installerFile); err != nil {
+				fmt.Printf("Error copying installer: %v\n", err)
+				return
+			}
+
+			if finalModel.installerType == "MSI" {
+				msiPath := filepath.Join(finalModel.outputDir, installerFile)
+				productCode, version, err := getMSIProductCode(msiPath)
+				if err != nil {
+					fmt.Printf("Error getting product code: %v\n", err)
+					return
+				}
+				finalModel.productCode = productCode
+				finalModel.version = version
+			}
+
 			if err := createPackageScripts(finalModel.outputDir, finalModel.packageName, finalModel.installerType); err != nil {
 				fmt.Printf("Error creating package scripts: %v\n", err)
 				return
 			}
-		} else {
-			fmt.Println("\n" + sectionStyle.Render("Actions"))
-			fmt.Printf("%s• Download functionality not yet implemented\n", indent)
-			return
+
+			fmt.Printf("%s• Generating IntuneWin package...\n", indent)
+			args := []string{
+				"-c", finalModel.outputDir,
+				"-s", filepath.Join(finalModel.outputDir, installerFile),
+				"-o", finalModel.outputDir,
+				"-q",
+			}
+			cmd := exec.Command(intuneUtilPath, args...)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				fmt.Printf("Error generating IntuneWin package: %v\n%s\n", err, output)
+				return
+			}
 		}
 
 		fmt.Println("\n" + titleStyle.Render("Package Complete"))
@@ -746,12 +797,6 @@ func run_interactive(cmd *cobra.Command, args []string) {
 
 		fmt.Println("\n" + sectionStyle.Render("Intune Configuration"))
 
-		if finalModel.mode != "Repackage Application" {
-			if err := createPackageScripts(finalModel.outputDir, finalModel.packageName, finalModel.installerType); err != nil {
-				fmt.Printf("Error creating package scripts: %v\n", err)
-				return
-			}
-		}
 		fmt.Printf("%s• Install Script: Install.ps1\n", indent)
 		fmt.Printf("%s• Uninstall Script: Uninstall.ps1\n", indent)
 
@@ -793,7 +838,7 @@ func run_interactive(cmd *cobra.Command, args []string) {
 }
 
 func ensureNexusDirs() error {
-	dirs := []string{nexusDir, intuneUtilDir, packagesDir}
+	dirs := []string{nexusDir, intuneUtilDir, packagesDir, downloadsDir}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %v", dir, err)
@@ -803,6 +848,24 @@ func ensureNexusDirs() error {
 }
 
 func downloadFile(url, filepath string) error {
+	dir := path.Dir(filepath)
+	fmt.Printf("    Creating directory: %s\n", dir)
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %v", dir, err)
+	}
+
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("directory creation failed, path still doesn't exist: %s", dir)
+	}
+
+	fmt.Printf("    Opening file for writing: %s\n", filepath)
+	out, err := os.Create(filepath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer out.Close()
+
 	resp, err := http.Get(url)
 	if err != nil {
 		return fmt.Errorf("failed to download file: %v", err)
@@ -813,23 +876,20 @@ func downloadFile(url, filepath string) error {
 		return fmt.Errorf("bad status: %s", resp.Status)
 	}
 
-	out, err := os.Create(filepath)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %v", err)
-	}
-	defer out.Close()
+	size := resp.ContentLength
+	fmt.Printf("    Downloading %s (%d bytes)...\n", path.Base(filepath), size)
 
 	_, err = io.Copy(out, resp.Body)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to save downloaded file: %v", err)
+	}
+
+	return nil
 }
 
 func ensureIntuneUtil() error {
 	if _, err := os.Stat(intuneUtilPath); err == nil {
 		return nil
-	}
-
-	if err := ensureNexusDirs(); err != nil {
-		return err
 	}
 
 	fmt.Println("Downloading IntuneWinAppUtil.exe...")
@@ -864,11 +924,12 @@ func get_existing_packages() ([]string, error) {
 	}
 
 	var packages []string
+	caser := cases.Title(language.English)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			name := entry.Name()
 			name = strings.ReplaceAll(name, "-", " ")
-			name = strings.Title(name)
+			name = caser.String(name)
 			packages = append(packages, name)
 		}
 	}
