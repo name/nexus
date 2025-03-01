@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,6 +81,7 @@ type model struct {
 	version       string
 	mode          string
 	packages      []string
+	packages_dir  string
 }
 
 func validateInput(source, installerType, input string) error {
@@ -120,7 +122,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		if m.step == 2 && m.mode != "Repackage Application" {
+		if m.step == -2 && m.typing {
+			switch msg.Type {
+			case tea.KeyEnter:
+				if m.textInput == "" {
+					m.textInput = packagesDir
+				}
+
+				if err := os.MkdirAll(m.textInput, 0755); err != nil {
+					m.validationErr = fmt.Sprintf("Failed to create directory: %v", err)
+					return m, nil
+				}
+
+				if err := save_config(m.textInput); err != nil {
+					m.validationErr = fmt.Sprintf("Failed to save configuration: %v", err)
+					return m, nil
+				}
+
+				m.packages_dir = m.textInput
+				m.step = -1
+				m.cursor = 0
+				m.typing = false
+				m.textInput = ""
+				m.validationErr = ""
+				return m, nil
+			case tea.KeyBackspace:
+				if len(m.textInput) > 0 {
+					m.textInput = m.textInput[:len(m.textInput)-1]
+				}
+				return m, nil
+			case tea.KeyRunes:
+				m.textInput += string(msg.Runes)
+				return m, nil
+			}
+		} else if m.step == -2 {
+			switch msg.String() {
+			case "up", "k":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down", "j":
+				if m.cursor < 1 {
+					m.cursor++
+				}
+			case "enter":
+				if m.cursor == 0 {
+					m.packages_dir = packagesDir
+					m.step = -1
+					m.cursor = 0
+				} else {
+					m.typing = true
+					m.textInput = packagesDir
+				}
+			}
+		} else if m.step == 2 && m.mode != "Repackage Application" {
 			m.typing = true
 			switch msg.Type {
 			case tea.KeyEnter:
@@ -130,7 +185,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					if m.mode == "Repackage Application" {
 						sanitized_name := sanitize_package_name(m.packageName)
-						package_dir := filepath.Join(packagesDir, sanitized_name)
+						package_dir := filepath.Join(m.packages_dir, sanitized_name)
 
 						if _, err := os.Stat(package_dir); os.IsNotExist(err) {
 							m.validationErr = fmt.Sprintf("Package '%s' does not exist", m.packageName)
@@ -154,7 +209,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				sanitized_name := sanitize_package_name(m.packageName)
-				package_dir := filepath.Join(packagesDir, sanitized_name)
+				package_dir := filepath.Join(m.packages_dir, sanitized_name)
 
 				if _, err := os.Stat(package_dir); err == nil {
 					entries, err := os.ReadDir(filepath.Dir(package_dir))
@@ -205,7 +260,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.packages) > 0 {
 					m.packageName = m.packages[m.cursor]
 					sanitized_name := sanitize_package_name(m.packageName)
-					package_dir := filepath.Join(packagesDir, sanitized_name)
+					package_dir := filepath.Join(m.packages_dir, sanitized_name)
 					m.outputDir = package_dir
 					m.step = 3
 					m.cursor = 0
@@ -248,7 +303,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "down", "j":
 				switch m.step {
 				case -1:
-					if m.cursor < 1 {
+					if m.cursor < 2 {
 						m.cursor++
 					}
 				case 0, 1:
@@ -259,9 +314,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				switch m.step {
 				case -1:
-					m.mode = []string{"New Application Package", "Repackage Application"}[m.cursor]
+					choices := []string{"New Application Package", "Repackage Application", "Set Packages Directory"}
+					m.mode = choices[m.cursor]
 					if m.mode == "Repackage Application" {
-						packages, err := get_existing_packages()
+						packages, err := get_existing_packages(m.packages_dir)
 						if err != nil {
 							m.err = err
 							return m, tea.Quit
@@ -274,6 +330,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 						m.packages = packages
 						m.step = 2
+						m.cursor = 0
+					} else if m.mode == "Set Packages Directory" {
+						m.step = -2
 						m.cursor = 0
 					} else {
 						m.step = 0
@@ -403,9 +462,31 @@ func (m model) View() string {
 	s += "\n\n"
 
 	switch m.step {
+	case -2:
+		s += "Set Packages Directory:\n\n"
+		if m.typing {
+			s += "Enter custom packages directory path:\n"
+			s += m.textInput
+			if m.validationErr != "" {
+				s += "\n\n" + lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#FF0000")).
+					Render("Error: "+m.validationErr)
+			}
+		} else {
+			choices := []string{"Use Default Directory", "Set Custom Directory"}
+			for i, choice := range choices {
+				cursor := " "
+				if m.cursor == i {
+					cursor = ">"
+				}
+				s += fmt.Sprintf("%s %s\n", cursor, choice)
+			}
+			s += "\n"
+			s += fmt.Sprintf("Current packages directory: %s", m.packages_dir)
+		}
 	case -1:
 		s += "Select Operation:\n\n"
-		choices := []string{"New Application Package", "Repackage Application"}
+		choices := []string{"New Application Package", "Repackage Application", "Set Packages Directory"}
 		for i, choice := range choices {
 			cursor := " "
 			if m.cursor == i {
@@ -413,6 +494,8 @@ func (m model) View() string {
 			}
 			s += fmt.Sprintf("%s %s\n", cursor, choice)
 		}
+		s += "\n"
+		s += fmt.Sprintf("Current packages directory: %s", m.packages_dir)
 	case 0:
 		s += "Select Installation Source:\n\n"
 		choices := []string{"Local File", "Download from Internet"}
@@ -606,7 +689,13 @@ func run_interactive(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	p := tea.NewProgram(model{step: -1})
+	packages_dir, err := load_config()
+	if err != nil {
+		fmt.Printf("Error loading configuration: %v\n", err)
+		packages_dir = packagesDir
+	}
+
+	p := tea.NewProgram(model{step: -1, packages_dir: packages_dir})
 	m, err := p.Run()
 	if err != nil {
 		fmt.Printf("Error running program: %v\n", err)
@@ -913,12 +1002,12 @@ func sanitizePackageName(name string) string {
 	return strings.Trim(name, "-")
 }
 
-func get_existing_packages() ([]string, error) {
-	if err := os.MkdirAll(packagesDir, 0755); err != nil {
+func get_existing_packages(packages_dir string) ([]string, error) {
+	if err := os.MkdirAll(packages_dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create packages directory: %v", err)
 	}
 
-	entries, err := os.ReadDir(packagesDir)
+	entries, err := os.ReadDir(packages_dir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read packages directory: %v", err)
 	}
@@ -939,4 +1028,47 @@ func get_existing_packages() ([]string, error) {
 
 func sanitize_package_name(name string) string {
 	return sanitizePackageName(name)
+}
+
+func load_config() (string, error) {
+	config_path := filepath.Join(nexusDir, "config.json")
+	if _, err := os.Stat(config_path); os.IsNotExist(err) {
+		return packagesDir, nil
+	}
+
+	data, err := os.ReadFile(config_path)
+	if err != nil {
+		return packagesDir, err
+	}
+
+	var config struct {
+		PackagesDir string `json:"packages_dir"`
+	}
+
+	if err := json.Unmarshal(data, &config); err != nil {
+		return packagesDir, err
+	}
+
+	if config.PackagesDir == "" {
+		return packagesDir, nil
+	}
+
+	return config.PackagesDir, nil
+}
+
+func save_config(packages_dir string) error {
+	config_path := filepath.Join(nexusDir, "config.json")
+
+	config := struct {
+		PackagesDir string `json:"packages_dir"`
+	}{
+		PackagesDir: packages_dir,
+	}
+
+	data, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(config_path, data, 0644)
 }
