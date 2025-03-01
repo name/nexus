@@ -957,7 +957,8 @@ func run_interactive(cmd *cobra.Command, args []string) {
 	m := initial_model()
 	m.packages_dir = packages_dir
 
-	p := tea.NewProgram(m)
+	// Add WithAltScreen() option to use fullscreen mode
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	final_model, err := p.Run()
 	if err != nil {
 		fmt.Printf("Error running program: %v\n", err)
