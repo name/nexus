@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"nexus/internal/msi"
@@ -18,6 +19,9 @@ import (
 
 	_ "embed"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -82,6 +86,50 @@ type model struct {
 	mode          string
 	packages      []string
 	packages_dir  string
+	text_input    textinput.Model
+	help          help.Model
+	keymap        keymap
+	suggestions   []string
+}
+
+type keymap struct{}
+
+func (k keymap) ShortHelp() []key.Binding {
+	return []key.Binding{
+		key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "complete")),
+		key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+	}
+}
+
+func (k keymap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{k.ShortHelp()}
+}
+
+func initial_model() model {
+	m := model{
+		step:         -1,
+		packages_dir: packagesDir,
+	}
+
+	// Initialize text input
+	ti := textinput.New()
+	ti.Placeholder = "application name"
+	ti.Prompt = "Package name: "
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF875F"))
+	ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF875F"))
+	ti.Focus()
+	ti.CharLimit = 50
+	ti.Width = 30
+	ti.ShowSuggestions = true
+
+	// Initialize help
+	h := help.New()
+
+	m.text_input = ti
+	m.help = h
+	m.keymap = keymap{}
+
+	return m
 }
 
 func validateInput(source, installerType, input string) error {
@@ -112,7 +160,99 @@ func validateInput(source, installerType, input string) error {
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	// Load existing packages for suggestions
+	packages, _ := get_existing_packages(m.packages_dir)
+	var suggestions []string
+	for _, pkg := range packages {
+		suggestions = append(suggestions, pkg)
+	}
+
+	// Add some common application names as suggestions
+	common_apps := []string{
+		"Microsoft Office",
+		"Adobe Acrobat Reader",
+		"Google Chrome",
+		"Mozilla Firefox",
+		"Zoom",
+		"Microsoft Teams",
+		"VLC Media Player",
+		"7-Zip",
+		"Notepad++",
+		"Visual Studio Code",
+	}
+
+	for _, app := range common_apps {
+		if !contains(suggestions, app) {
+			suggestions = append(suggestions, app)
+		}
+	}
+
+	m.suggestions = suggestions
+	m.text_input.SetSuggestions(suggestions)
+
+	return textinput.Blink
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// Add this function to handle file path suggestions
+func get_path_suggestions(current_path string) []string {
+	var suggestions []string
+
+	// Get the directory to look in
+	dir_path := filepath.Dir(current_path)
+	if dir_path == "." {
+		dir_path = "."
+		current_path = ""
+	}
+
+	// If empty, start with drives on Windows or root on other OS
+	if dir_path == "." && current_path == "" {
+		if runtime.GOOS == "windows" {
+			for _, drive := range "ABCDEFGHIJKLMNOPQRSTUVWXYZ" {
+				drive_path := string(drive) + ":\\"
+				if _, err := os.Stat(drive_path); err == nil {
+					suggestions = append(suggestions, drive_path)
+				}
+			}
+			return suggestions
+		} else {
+			dir_path = "/"
+		}
+	}
+
+	// Read directory contents
+	files, err := os.ReadDir(dir_path)
+	if err != nil {
+		return suggestions
+	}
+
+	// Get the base name to filter with
+	base_name := filepath.Base(current_path)
+	if base_name == "." || dir_path == current_path {
+		base_name = ""
+	}
+
+	// Add matching entries
+	for _, file := range files {
+		name := file.Name()
+		if strings.HasPrefix(strings.ToLower(name), strings.ToLower(base_name)) {
+			full_path := filepath.Join(dir_path, name)
+			if file.IsDir() {
+				full_path = filepath.Join(full_path, "") // Add trailing separator
+			}
+			suggestions = append(suggestions, full_path)
+		}
+	}
+
+	return suggestions
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -120,6 +260,117 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+
+		// Handle custom directory input
+		if m.step == -2 && m.typing {
+			switch msg.Type {
+			case tea.KeyEnter:
+				input := m.text_input.Value()
+				if input == "" {
+					input = packagesDir
+				}
+
+				if err := os.MkdirAll(input, 0755); err != nil {
+					m.validationErr = fmt.Sprintf("Failed to create directory: %v", err)
+					return m, nil
+				}
+
+				if err := save_config(input); err != nil {
+					m.validationErr = fmt.Sprintf("Failed to save configuration: %v", err)
+					return m, nil
+				}
+
+				m.packages_dir = input
+				m.step = -1
+				m.cursor = 0
+				m.typing = false
+				m.text_input.Reset()
+				m.validationErr = ""
+				return m, nil
+			default:
+				// If Tab is pressed, update suggestions with directory paths
+				if msg.String() == "tab" {
+					suggestions := get_path_suggestions(m.text_input.Value())
+					m.text_input.SetSuggestions(suggestions)
+				}
+
+				var cmd tea.Cmd
+				m.text_input, cmd = m.text_input.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// Handle autocomplete input when in package name input step
+		if m.step == 2 && m.mode != "Repackage Application" && m.packageName == "" {
+			switch msg.Type {
+			case tea.KeyEnter:
+				m.packageName = m.text_input.Value()
+				m.text_input.Reset()
+				m.text_input.Focus() // Keep focus for the next input
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.text_input, cmd = m.text_input.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// Handle file path input with autocomplete
+		if m.step == 2 && m.mode != "Repackage Application" && m.packageName != "" {
+			switch msg.Type {
+			case tea.KeyEnter:
+				input := m.text_input.Value()
+				if err := validateInput(m.source, m.installerType, input); err != nil {
+					m.validationErr = err.Error()
+					return m, nil
+				}
+
+				m.textInput = input
+
+				sanitized_name := sanitize_package_name(m.packageName)
+				package_dir := filepath.Join(m.packages_dir, sanitized_name)
+
+				// Check for existing package directory
+				if _, err := os.Stat(package_dir); err == nil {
+					entries, err := os.ReadDir(filepath.Dir(package_dir))
+					if err == nil {
+						prefix := filepath.Base(package_dir)
+						for _, entry := range entries {
+							if strings.HasPrefix(entry.Name(), prefix) {
+								os.RemoveAll(filepath.Join(filepath.Dir(package_dir), entry.Name()))
+							}
+						}
+					}
+					if err := os.RemoveAll(package_dir); err != nil {
+						m.err = fmt.Errorf("failed to remove existing package directory: %v", err)
+						return m, tea.Quit
+					}
+				}
+
+				if err := os.MkdirAll(package_dir, 0755); err != nil {
+					m.err = err
+					return m, tea.Quit
+				}
+
+				m.outputDir = package_dir
+				m.step++
+				m.typing = false
+				m.cursor = 0
+				m.validationErr = ""
+				m.text_input.Blur()
+				return m, nil
+			default:
+				// Update suggestions when typing
+				if msg.String() == "tab" {
+					suggestions := get_path_suggestions(m.text_input.Value())
+					m.text_input.SetSuggestions(suggestions)
+				}
+
+				var cmd tea.Cmd
+				m.text_input, cmd = m.text_input.Update(msg)
+				return m, cmd
+			}
 		}
 
 		if m.step == -2 && m.typing {
@@ -465,8 +716,10 @@ func (m model) View() string {
 	case -2:
 		s += "Set Packages Directory:\n\n"
 		if m.typing {
-			s += "Enter custom packages directory path:\n"
-			s += m.textInput
+			m.text_input.Prompt = "Enter custom packages directory path: "
+			m.text_input.Placeholder = packagesDir
+			s += m.text_input.View()
+
 			if m.validationErr != "" {
 				s += "\n\n" + lipgloss.NewStyle().
 					Foreground(lipgloss.Color("#FF0000")).
@@ -531,19 +784,24 @@ func (m model) View() string {
 				}
 			}
 		} else if m.packageName == "" {
-			s += "Enter package name: " + m.textInput
+			s += m.text_input.View()
 		} else {
 			label := "path to"
 			if m.source == "Download from Internet" {
 				label = "download URL for"
+				m.text_input.Placeholder = "https://example.com/installer.exe"
+			} else {
+				m.text_input.Placeholder = "C:\\path\\to\\installer.exe"
 			}
-			s += fmt.Sprintf("Enter %s %s file: %s", label, m.installerType, m.textInput)
-		}
 
-		if m.validationErr != "" {
-			s += "\n\n" + lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FF0000")).
-				Render("Error: "+m.validationErr)
+			m.text_input.Prompt = fmt.Sprintf("Enter %s %s file: ", label, m.installerType)
+			s += m.text_input.View()
+
+			if m.validationErr != "" {
+				s += "\n\n" + lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#FF0000")).
+					Render("Error: "+m.validationErr)
+			}
 		}
 	case 3:
 		s += titleStyle.Render("Package Summary")
@@ -587,7 +845,7 @@ func (m model) View() string {
 		}
 	}
 
-	s += "\n" + lipgloss.NewStyle().Faint(true).Render("Press Ctrl+C to quit")
+	s += "\n\n" + m.help.View(m.keymap)
 	return s
 }
 
@@ -695,14 +953,18 @@ func run_interactive(cmd *cobra.Command, args []string) {
 		packages_dir = packagesDir
 	}
 
-	p := tea.NewProgram(model{step: -1, packages_dir: packages_dir})
-	m, err := p.Run()
+	// Use the new initial_model function
+	m := initial_model()
+	m.packages_dir = packages_dir
+
+	p := tea.NewProgram(m)
+	final_model, err := p.Run()
 	if err != nil {
 		fmt.Printf("Error running program: %v\n", err)
 		return
 	}
 
-	finalModel := m.(model)
+	finalModel := final_model.(model)
 	if finalModel.step == 3 && finalModel.cursor == 0 {
 		fmt.Println("\n" + titleStyle.Render("Creating Package"))
 		indent := "    "
@@ -888,12 +1150,6 @@ func run_interactive(cmd *cobra.Command, args []string) {
 
 		fmt.Printf("%s• Install Script: Install.ps1\n", indent)
 		fmt.Printf("%s• Uninstall Script: Uninstall.ps1\n", indent)
-
-		fmt.Println("\n" + sectionStyle.Render("Installation Commands"))
-		fmt.Printf("%s• Install Command:\n", indent)
-		fmt.Printf("%s  powershell.exe -ExecutionPolicy Bypass -File .\\Install.ps1\n", indent)
-		fmt.Printf("%s• Uninstall Command:\n", indent)
-		fmt.Printf("%s  powershell.exe -ExecutionPolicy Bypass -File .\\Uninstall.ps1\n", indent)
 
 		fmt.Println("\n" + sectionStyle.Render("Detection Method"))
 		if finalModel.installerType == "MSI" {
