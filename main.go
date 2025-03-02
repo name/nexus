@@ -986,16 +986,30 @@ func run_interactive(cmd *cobra.Command, args []string) {
 			strings.ToLower(finalModel.installerType))
 
 		if finalModel.mode == "Repackage Application" {
-			fmt.Println("\n" + sectionStyle.Render("Actions"))
+			fmt.Println("\n" + sectionStyle.Render("Actions:"))
 			fmt.Printf("%s• Analyzing existing package...\n", indent)
 			fmt.Printf("%s  - Package directory: %s\n", indent, finalModel.outputDir)
 
+			// Clean up existing .intunewin files
+			fmt.Printf("%s• Cleaning up existing package files...\n", indent)
 			files, err := os.ReadDir(finalModel.outputDir)
 			if err != nil {
 				fmt.Printf("Error reading package directory: %v\n", err)
 				return
 			}
 
+			// Delete any existing .intunewin files
+			for _, file := range files {
+				if !file.IsDir() && strings.HasSuffix(strings.ToLower(file.Name()), ".intunewin") {
+					intunewin_path := filepath.Join(finalModel.outputDir, file.Name())
+					fmt.Printf("%s  - Removing: %s\n", indent, file.Name())
+					if err := os.Remove(intunewin_path); err != nil {
+						fmt.Printf("%s  - Warning: Failed to remove %s: %v\n", indent, file.Name(), err)
+					}
+				}
+			}
+
+			// Find the installer file
 			var installer_path string
 			var installer_file string
 			for _, file := range files {
@@ -1019,27 +1033,10 @@ func run_interactive(cmd *cobra.Command, args []string) {
 				finalModel.installerType = "EXE"
 			}
 
-			install_script_path := filepath.Join(finalModel.outputDir, "Install.ps1")
-			uninstall_script_path := filepath.Join(finalModel.outputDir, "Uninstall.ps1")
-
-			if _, err := os.Stat(install_script_path); err == nil {
-				fmt.Printf("%s• Using existing Install.ps1 script\n", indent)
-			} else {
-				fmt.Printf("%s• Warning: Install.ps1 not found\n", indent)
-			}
-
-			if _, err := os.Stat(uninstall_script_path); err == nil {
-				fmt.Printf("%s• Using existing Uninstall.ps1 script\n", indent)
-			} else {
-				fmt.Printf("%s• Warning: Uninstall.ps1 not found\n", indent)
-			}
-
-			fmt.Printf("%s• Generating IntuneWin package...\n", indent)
-			fmt.Printf("%s  - Source: %s\n", indent, installer_path)
-			fmt.Printf("%s  - Output: %s\n", indent, finalModel.outputDir)
-
+			// Add a small delay to ensure file operations are complete
 			time.Sleep(500 * time.Millisecond)
 
+			// Extract MSI metadata if applicable
 			if finalModel.installerType == "MSI" {
 				product_code, version, err := getMSIProductCode(installer_path)
 				if err != nil {
@@ -1053,6 +1050,28 @@ func run_interactive(cmd *cobra.Command, args []string) {
 					fmt.Printf("%s  - Version: %s\n", indent, version)
 				}
 			}
+
+			// Generate new IntuneWin package
+			fmt.Printf("%s• Generating IntuneWin package...\n", indent)
+			fmt.Printf("%s  - Source: %s\n", indent, installer_path)
+			fmt.Printf("%s  - Output: %s\n", indent, finalModel.outputDir)
+
+			args := []string{
+				"-c", finalModel.outputDir,
+				"-s", installer_path,
+				"-o", finalModel.outputDir,
+				"-q",
+			}
+			cmd := exec.Command(intuneUtilPath, args...)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				fmt.Printf("%s  - Error generating IntuneWin package: %v\n%s\n", indent, err, output)
+				return
+			}
+			fmt.Printf("%s  - IntuneWin package created successfully\n", indent)
+
+			// Completion message
+			fmt.Printf("%s• Package creation complete\n", indent)
+			fmt.Printf("%s  - IntuneWin file: %s\n", indent, intunewinFile)
 		} else if finalModel.source == "Local File" {
 			fmt.Println("\n" + sectionStyle.Render("Actions:"))
 			fmt.Printf("%s• Preparing package directory...\n", indent)
