@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
+	"time"
 
 	"nexus/internal/msi"
 
@@ -37,12 +39,16 @@ var rootCmd = &cobra.Command{
 
 var (
 	titleStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#FF875F")).
-		Margin(0, 0, 1, 0).
-		Padding(0, 2).
-		Width(50)
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#FF875F")).
+			Padding(0, 2)
+
+	sectionStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#FF875F")).
+			Padding(0, 1).
+			MarginBottom(1)
 )
 
 const (
@@ -89,7 +95,6 @@ type model struct {
 	text_input    textinput.Model
 	help          help.Model
 	keymap        keymap
-	suggestions   []string
 }
 
 type keymap struct{}
@@ -111,18 +116,16 @@ func initial_model() model {
 		packages_dir: packagesDir,
 	}
 
-	// Initialize text input
 	ti := textinput.New()
 	ti.Placeholder = "application name"
 	ti.Prompt = "Package name: "
 	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF875F"))
 	ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF875F"))
 	ti.Focus()
-	ti.CharLimit = 50
-	ti.Width = 30
+	ti.CharLimit = 500
+	ti.Width = 60
 	ti.ShowSuggestions = true
 
-	// Initialize help
 	h := help.New()
 
 	m.text_input = ti
@@ -133,7 +136,7 @@ func initial_model() model {
 }
 
 func validateInput(source, installerType, input string) error {
-	if source == "Download from Internet" {
+	if source == "Download File" {
 		if !strings.HasPrefix(strings.ToLower(input), "https://") {
 			return fmt.Errorf("URL must start with 'https://'")
 		}
@@ -160,14 +163,10 @@ func validateInput(source, installerType, input string) error {
 }
 
 func (m model) Init() tea.Cmd {
-	// Load existing packages for suggestions
 	packages, _ := get_existing_packages(m.packages_dir)
 	var suggestions []string
-	for _, pkg := range packages {
-		suggestions = append(suggestions, pkg)
-	}
+	suggestions = append(suggestions, packages...)
 
-	// Add some common application names as suggestions
 	common_apps := []string{
 		"Microsoft Office",
 		"Adobe Acrobat Reader",
@@ -187,7 +186,6 @@ func (m model) Init() tea.Cmd {
 		}
 	}
 
-	m.suggestions = suggestions
 	m.text_input.SetSuggestions(suggestions)
 
 	return textinput.Blink
@@ -202,18 +200,15 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// Add this function to handle file path suggestions
 func get_path_suggestions(current_path string) []string {
 	var suggestions []string
 
-	// Get the directory to look in
 	dir_path := filepath.Dir(current_path)
 	if dir_path == "." {
 		dir_path = "."
 		current_path = ""
 	}
 
-	// If empty, start with drives on Windows or root on other OS
 	if dir_path == "." && current_path == "" {
 		if runtime.GOOS == "windows" {
 			for _, drive := range "ABCDEFGHIJKLMNOPQRSTUVWXYZ" {
@@ -228,25 +223,22 @@ func get_path_suggestions(current_path string) []string {
 		}
 	}
 
-	// Read directory contents
 	files, err := os.ReadDir(dir_path)
 	if err != nil {
 		return suggestions
 	}
 
-	// Get the base name to filter with
 	base_name := filepath.Base(current_path)
 	if base_name == "." || dir_path == current_path {
 		base_name = ""
 	}
 
-	// Add matching entries
 	for _, file := range files {
 		name := file.Name()
 		if strings.HasPrefix(strings.ToLower(name), strings.ToLower(base_name)) {
 			full_path := filepath.Join(dir_path, name)
 			if file.IsDir() {
-				full_path = filepath.Join(full_path, "") // Add trailing separator
+				full_path = filepath.Join(full_path, "")
 			}
 			suggestions = append(suggestions, full_path)
 		}
@@ -262,7 +254,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		// Handle custom directory input
 		if m.step == -2 && m.typing {
 			switch msg.Type {
 			case tea.KeyEnter:
@@ -289,7 +280,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.validationErr = ""
 				return m, nil
 			default:
-				// If Tab is pressed, update suggestions with directory paths
 				if msg.String() == "tab" {
 					suggestions := get_path_suggestions(m.text_input.Value())
 					m.text_input.SetSuggestions(suggestions)
@@ -301,13 +291,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Handle autocomplete input when in package name input step
 		if m.step == 2 && m.mode != "Repackage Application" && m.packageName == "" {
 			switch msg.Type {
 			case tea.KeyEnter:
 				m.packageName = m.text_input.Value()
 				m.text_input.Reset()
-				m.text_input.Focus() // Keep focus for the next input
+				m.text_input.Focus()
 				return m, nil
 			default:
 				var cmd tea.Cmd
@@ -316,7 +305,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Handle file path input with autocomplete
 		if m.step == 2 && m.mode != "Repackage Application" && m.packageName != "" {
 			switch msg.Type {
 			case tea.KeyEnter:
@@ -331,7 +319,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sanitized_name := sanitize_package_name(m.packageName)
 				package_dir := filepath.Join(m.packages_dir, sanitized_name)
 
-				// Check for existing package directory
 				if _, err := os.Stat(package_dir); err == nil {
 					entries, err := os.ReadDir(filepath.Dir(package_dir))
 					if err == nil {
@@ -361,7 +348,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.text_input.Blur()
 				return m, nil
 			default:
-				// Update suggestions when typing
 				if msg.String() == "tab" {
 					suggestions := get_path_suggestions(m.text_input.Value())
 					m.text_input.SetSuggestions(suggestions)
@@ -419,11 +405,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if m.cursor == 0 {
 					m.packages_dir = packagesDir
+
+					if err := save_config(packagesDir); err != nil {
+						m.validationErr = fmt.Sprintf("Failed to save configuration: %v", err)
+						return m, nil
+					}
+
 					m.step = -1
 					m.cursor = 0
 				} else {
 					m.typing = true
-					m.textInput = packagesDir
+					m.text_input.Reset()
+					m.text_input.SetValue(packagesDir)
+					m.text_input.Focus()
 				}
 			}
 		} else if m.step == 2 && m.mode != "Repackage Application" {
@@ -590,7 +584,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.cursor = 0
 				case 0:
-					m.source = []string{"Local File", "Download from Internet"}[m.cursor]
+					m.source = []string{"Local File", "Download File"}[m.cursor]
 					m.step++
 					m.cursor = 0
 				case 1:
@@ -709,8 +703,10 @@ func createPackageScripts(outputDir, packageName, installerType string) error {
 }
 
 func (m model) View() string {
-	s := titleStyle.Render("Welcome to the Nexus CLI preview!")
+	s := titleStyle.Render("Welcome to the packager preview!")
 	s += "\n\n"
+
+	selected_style := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF875F"))
 
 	switch m.step {
 	case -2:
@@ -730,7 +726,8 @@ func (m model) View() string {
 			for i, choice := range choices {
 				cursor := " "
 				if m.cursor == i {
-					cursor = ">"
+					cursor = "▸"
+					choice = selected_style.Render(choice)
 				}
 				s += fmt.Sprintf("%s %s\n", cursor, choice)
 			}
@@ -738,24 +735,34 @@ func (m model) View() string {
 			s += fmt.Sprintf("Current packages directory: %s", m.packages_dir)
 		}
 	case -1:
-		s += "Select Operation:\n\n"
+		s += sectionStyle.Render("Select Operation") + "\n"
 		choices := []string{"New Application Package", "Repackage Application", "Set Packages Directory"}
 		for i, choice := range choices {
 			cursor := " "
 			if m.cursor == i {
-				cursor = ">"
+				cursor = "▸"
+				choice = selected_style.Render(choice)
 			}
 			s += fmt.Sprintf("%s %s\n", cursor, choice)
 		}
 		s += "\n"
 		s += fmt.Sprintf("Current packages directory: %s", m.packages_dir)
+
+		recent_packages, _ := get_recent_packages(m.packages_dir, 3)
+		if len(recent_packages) > 0 {
+			s += "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#FF875F")).Render("Recent packages:")
+			for _, pkg := range recent_packages {
+				s += fmt.Sprintf("\n  • %s", pkg)
+			}
+		}
 	case 0:
 		s += "Select Installation Source:\n\n"
-		choices := []string{"Local File", "Download from Internet"}
+		choices := []string{"Local File", "Download File"}
 		for i, choice := range choices {
 			cursor := " "
 			if m.cursor == i {
-				cursor = ">"
+				cursor = "▸"
+				choice = selected_style.Render(choice)
 			}
 			s += fmt.Sprintf("%s %s\n", cursor, choice)
 		}
@@ -765,7 +772,8 @@ func (m model) View() string {
 		for i, choice := range choices {
 			cursor := " "
 			if m.cursor == i {
-				cursor = ">"
+				cursor = "▸"
+				choice = selected_style.Render(choice)
 			}
 			s += fmt.Sprintf("%s %s\n", cursor, choice)
 		}
@@ -778,7 +786,8 @@ func (m model) View() string {
 				for i, pkg := range m.packages {
 					cursor := " "
 					if m.cursor == i {
-						cursor = ">"
+						cursor = "▸"
+						pkg = selected_style.Render(pkg)
 					}
 					s += fmt.Sprintf("%s %s\n", cursor, pkg)
 				}
@@ -787,7 +796,7 @@ func (m model) View() string {
 			s += m.text_input.View()
 		} else {
 			label := "path to"
-			if m.source == "Download from Internet" {
+			if m.source == "Download File" {
 				label = "download URL for"
 				m.text_input.Placeholder = "https://example.com/installer.exe"
 			} else {
@@ -840,6 +849,7 @@ func (m model) View() string {
 			cursor := fmt.Sprintf("%s  ", indent)
 			if m.cursor == i {
 				cursor = fmt.Sprintf("%s▸ ", indent)
+				choice = selected_style.Render(choice)
 			}
 			s += fmt.Sprintf("%s%s\n", cursor, choice)
 		}
@@ -953,12 +963,10 @@ func run_interactive(cmd *cobra.Command, args []string) {
 		packages_dir = packagesDir
 	}
 
-	// Use the new initial_model function
 	m := initial_model()
 	m.packages_dir = packages_dir
 
-	// Add WithAltScreen() option to use fullscreen mode
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	final_model, err := p.Run()
 	if err != nil {
 		fmt.Printf("Error running program: %v\n", err)
@@ -979,7 +987,8 @@ func run_interactive(cmd *cobra.Command, args []string) {
 
 		if finalModel.mode == "Repackage Application" {
 			fmt.Println("\n" + sectionStyle.Render("Actions"))
-			fmt.Printf("%s• Repackaging existing application...\n", indent)
+			fmt.Printf("%s• Analyzing existing package...\n", indent)
+			fmt.Printf("%s  - Package directory: %s\n", indent, finalModel.outputDir)
 
 			files, err := os.ReadDir(finalModel.outputDir)
 			if err != nil {
@@ -988,11 +997,13 @@ func run_interactive(cmd *cobra.Command, args []string) {
 			}
 
 			var installer_path string
+			var installer_file string
 			for _, file := range files {
 				if !file.IsDir() && (strings.HasSuffix(strings.ToLower(file.Name()), ".msi") ||
 					strings.HasSuffix(strings.ToLower(file.Name()), ".exe")) {
 					installer_path = filepath.Join(finalModel.outputDir, file.Name())
-					installerFile = file.Name()
+					installer_file = file.Name()
+					fmt.Printf("%s  - Found installer: %s\n", indent, installer_file)
 					break
 				}
 			}
@@ -1002,7 +1013,7 @@ func run_interactive(cmd *cobra.Command, args []string) {
 				return
 			}
 
-			if strings.HasSuffix(strings.ToLower(installerFile), ".msi") {
+			if strings.HasSuffix(strings.ToLower(installer_file), ".msi") {
 				finalModel.installerType = "MSI"
 			} else {
 				finalModel.installerType = "EXE"
@@ -1024,50 +1035,62 @@ func run_interactive(cmd *cobra.Command, args []string) {
 			}
 
 			fmt.Printf("%s• Generating IntuneWin package...\n", indent)
-			args := []string{
-				"-c", finalModel.outputDir,
-				"-s", installer_path,
-				"-o", finalModel.outputDir,
-				"-q",
-			}
-			cmd := exec.Command(intuneUtilPath, args...)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				fmt.Printf("Error generating IntuneWin package: %v\n%s\n", err, output)
-				return
-			}
+			fmt.Printf("%s  - Source: %s\n", indent, installer_path)
+			fmt.Printf("%s  - Output: %s\n", indent, finalModel.outputDir)
+
+			time.Sleep(500 * time.Millisecond)
 
 			if finalModel.installerType == "MSI" {
 				product_code, version, err := getMSIProductCode(installer_path)
 				if err != nil {
-					fmt.Printf("Warning: Could not get MSI product code: %v\n", err)
+					fmt.Printf("%s• Warning: Could not extract MSI metadata: %v\n", indent, err)
+					fmt.Printf("%s  - You may need to manually set detection rules in Intune\n", indent)
 				} else {
 					finalModel.productCode = product_code
 					finalModel.version = version
+					fmt.Printf("%s• Successfully extracted MSI metadata\n", indent)
+					fmt.Printf("%s  - Product Code: %s\n", indent, product_code)
+					fmt.Printf("%s  - Version: %s\n", indent, version)
 				}
 			}
 		} else if finalModel.source == "Local File" {
-			fmt.Println("\n" + sectionStyle.Render("Actions"))
+			fmt.Println("\n" + sectionStyle.Render("Actions:"))
+			fmt.Printf("%s• Preparing package directory...\n", indent)
+			fmt.Printf("%s  - Creating: %s\n", indent, finalModel.outputDir)
+
 			fmt.Printf("%s• Copying installer file...\n", indent)
+			fmt.Printf("%s  - Source: %s\n", indent, finalModel.textInput)
+			fmt.Printf("%s  - Destination: %s\n", indent, filepath.Join(finalModel.outputDir, installerFile))
+
 			if err := copyFileToDir(finalModel.textInput, finalModel.outputDir, installerFile); err != nil {
 				fmt.Printf("Error copying installer: %v\n", err)
 				return
 			}
 
+			time.Sleep(500 * time.Millisecond)
+
 			if finalModel.installerType == "MSI" {
+				fmt.Printf("%s• Extracting MSI metadata...\n", indent)
 				msiPath := filepath.Join(finalModel.outputDir, installerFile)
 				productCode, version, err := getMSIProductCode(msiPath)
 				if err != nil {
-					fmt.Printf("Error getting product code: %v\n", err)
-					return
+					fmt.Printf("%s  - Warning: Could not extract MSI metadata: %v\n", indent, err)
+					fmt.Printf("%s  - You may need to manually set detection rules in Intune\n", indent)
+				} else {
+					finalModel.productCode = productCode
+					finalModel.version = version
+					fmt.Printf("%s  - Product Code: %s\n", indent, productCode)
+					fmt.Printf("%s  - Version: %s\n", indent, version)
 				}
-				finalModel.productCode = productCode
-				finalModel.version = version
 			}
 
+			fmt.Printf("%s• Creating installation scripts...\n", indent)
 			if err := createPackageScripts(finalModel.outputDir, finalModel.packageName, finalModel.installerType); err != nil {
 				fmt.Printf("Error creating package scripts: %v\n", err)
 				return
 			}
+			fmt.Printf("%s  - Install.ps1: Silent installation script\n", indent)
+			fmt.Printf("%s  - Uninstall.ps1: Clean removal script\n", indent)
 
 			fmt.Printf("%s• Generating IntuneWin package...\n", indent)
 			args := []string{
@@ -1082,38 +1105,63 @@ func run_interactive(cmd *cobra.Command, args []string) {
 				return
 			}
 
+			fmt.Printf("%s• Package creation complete\n", indent)
+			fmt.Printf("%s  - IntuneWin file: %s\n", indent, intunewinFile)
 		} else {
-			fmt.Println("\n" + sectionStyle.Render("Actions"))
+			fmt.Println("\n" + sectionStyle.Render("Actions:"))
 			fmt.Printf("%s• Downloading installer file...\n", indent)
 
 			download_path := filepath.Join(downloadsDir, installerFile)
 
+			fmt.Printf("%s  - URL: %s\n", indent, finalModel.textInput)
+			fmt.Printf("%s  - Temporary location: %s\n", indent, download_path)
+
 			if err := downloadFile(finalModel.textInput, download_path); err != nil {
-				fmt.Printf("Error downloading installer: %v\n", err)
+				fmt.Printf("%s  - Error downloading installer: %v\n", indent, err)
 				return
 			}
+
+			if _, err := os.Stat(download_path); os.IsNotExist(err) {
+				fmt.Printf("%s  - Error: Download failed, file not found\n", indent)
+				return
+			}
+
+			fmt.Printf("%s  - Download complete\n", indent)
+
+			fmt.Printf("%s• Preparing package directory...\n", indent)
+			fmt.Printf("%s  - Creating: %s\n", indent, finalModel.outputDir)
 
 			fmt.Printf("%s• Copying installer to package directory...\n", indent)
 			if err := copyFileToDir(download_path, finalModel.outputDir, installerFile); err != nil {
-				fmt.Printf("Error copying installer: %v\n", err)
+				fmt.Printf("%s  - Error copying installer: %v\n", indent, err)
 				return
 			}
+			fmt.Printf("%s  - Copy complete\n", indent)
+
+			time.Sleep(500 * time.Millisecond)
 
 			if finalModel.installerType == "MSI" {
+				fmt.Printf("%s• Extracting MSI metadata...\n", indent)
 				msiPath := filepath.Join(finalModel.outputDir, installerFile)
 				productCode, version, err := getMSIProductCode(msiPath)
 				if err != nil {
-					fmt.Printf("Error getting product code: %v\n", err)
-					return
+					fmt.Printf("%s  - Warning: Could not extract MSI metadata: %v\n", indent, err)
+					fmt.Printf("%s  - You may need to manually set detection rules in Intune\n", indent)
+				} else {
+					finalModel.productCode = productCode
+					finalModel.version = version
+					fmt.Printf("%s  - Product Code: %s\n", indent, productCode)
+					fmt.Printf("%s  - Version: %s\n", indent, version)
 				}
-				finalModel.productCode = productCode
-				finalModel.version = version
 			}
 
+			fmt.Printf("%s• Creating installation scripts...\n", indent)
 			if err := createPackageScripts(finalModel.outputDir, finalModel.packageName, finalModel.installerType); err != nil {
-				fmt.Printf("Error creating package scripts: %v\n", err)
+				fmt.Printf("%s  - Error creating package scripts: %v\n", indent, err)
 				return
 			}
+			fmt.Printf("%s  - Install.ps1: Silent installation script\n", indent)
+			fmt.Printf("%s  - Uninstall.ps1: Clean removal script\n", indent)
 
 			fmt.Printf("%s• Generating IntuneWin package...\n", indent)
 			args := []string{
@@ -1124,35 +1172,38 @@ func run_interactive(cmd *cobra.Command, args []string) {
 			}
 			cmd := exec.Command(intuneUtilPath, args...)
 			if output, err := cmd.CombinedOutput(); err != nil {
-				fmt.Printf("Error generating IntuneWin package: %v\n%s\n", err, output)
+				fmt.Printf("%s  - Error generating IntuneWin package: %v\n%s\n", indent, err, output)
 				return
 			}
+			fmt.Printf("%s  - IntuneWin package created successfully\n", indent)
+
+			fmt.Printf("%s• Package creation complete\n", indent)
+			fmt.Printf("%s  - IntuneWin file: %s\n", indent, intunewinFile)
 		}
 
 		fmt.Println("\n" + titleStyle.Render("Package Complete"))
 
-		fmt.Println("\n" + sectionStyle.Render("Package Summary"))
+		fmt.Println("\n" + sectionStyle.Render("Summary:"))
 		fmt.Printf("%s• Name: %s\n", indent, finalModel.packageName)
-		fmt.Printf("%s• Type: %s\n", indent, finalModel.installerType)
 		if finalModel.version != "" {
 			fmt.Printf("%s• Version: %s\n", indent, finalModel.version)
 		}
+		fmt.Printf("%s• Source: %s\n", indent, finalModel.textInput)
 		if finalModel.installerType == "MSI" {
 			fmt.Printf("%s• Product Code: %s\n", indent, finalModel.productCode)
 		}
 
-		fmt.Println("\n" + sectionStyle.Render("Package Location"))
-		fmt.Printf("%s• Source: %s\n", indent, finalModel.textInput)
-		fmt.Printf("%s• Package Directory: %s\n", indent, finalModel.outputDir)
+		fmt.Println("\n" + sectionStyle.Render("Location:"))
 		fmt.Printf("%s• Installer File: %s\n", indent, installerFile)
 		fmt.Printf("%s• IntuneWin File: %s\n", indent, intunewinFile)
+		fmt.Printf("%s• Package Directory: %s\n", indent, finalModel.outputDir)
 
-		fmt.Println("\n" + sectionStyle.Render("Intune Configuration"))
+		fmt.Println("\n" + sectionStyle.Render("Intune Configuration:"))
 
 		fmt.Printf("%s• Install Script: Install.ps1\n", indent)
 		fmt.Printf("%s• Uninstall Script: Uninstall.ps1\n", indent)
 
-		fmt.Println("\n" + sectionStyle.Render("Detection Method"))
+		fmt.Println("\n" + sectionStyle.Render("Intune Detection Method:"))
 		if finalModel.installerType == "MSI" {
 			fmt.Printf("%s• MSI Product Code:\n", indent)
 			fmt.Printf("%s  - Property: ProductCode\n", indent)
@@ -1167,18 +1218,23 @@ func run_interactive(cmd *cobra.Command, args []string) {
 			fmt.Printf("%s• Use custom detection script or file existence\n", indent)
 		}
 
-		fmt.Println("\n" + sectionStyle.Render("Additional Configuration"))
-		fmt.Printf("%s• To modify installation arguments:\n", indent)
+		fmt.Println("\n" + sectionStyle.Render("Customizing Installation:"))
+		fmt.Printf("%s• Installation Arguments:\n", indent)
 		if finalModel.installerType == "MSI" {
-			fmt.Printf("%s  - Default: /qn /norestart\n", indent)
-			fmt.Printf("%s  - Edit Install.ps1 and modify $install_args\n", indent)
+			fmt.Printf("%s  Current: /qn /norestart (silent install, no restart)\n", indent)
 		} else {
-			fmt.Printf("%s  - Default: /silent\n", indent)
-			fmt.Printf("%s  - Edit Install.ps1 and modify $install_args\n", indent)
+			fmt.Printf("%s  Current: /silent (silent install)\n", indent)
 		}
-		fmt.Printf("%s• To add custom installation steps:\n", indent)
-		fmt.Printf("%s  - Edit Install.ps1 in the package directory\n", indent)
-		fmt.Printf("%s  - Add steps before or after the install_application function\n", indent)
+		fmt.Printf("%s  To modify: Open Install.ps1 and update $install_args\n", indent)
+
+		fmt.Printf("\n%s• Custom Installation Steps:\n", indent)
+		fmt.Printf("%s  1. Open Install.ps1 in the package directory\n", indent)
+		fmt.Printf("%s  2. Add your custom PowerShell code:\n", indent)
+		fmt.Printf("%s     - Before install_application() for pre-install tasks\n", indent)
+		fmt.Printf("%s     - After install_application() for post-install tasks\n", indent)
+		fmt.Printf("%s  3. After making changes, repackage the application using:\n", indent)
+		fmt.Printf("%s     - Select 'Repackage Application' from main menu\n", indent)
+		fmt.Printf("%s     - Choose the modified package to create new IntuneWin file\n", indent)
 		fmt.Println()
 	}
 }
@@ -1195,7 +1251,9 @@ func ensureNexusDirs() error {
 
 func downloadFile(url, filepath string) error {
 	dir := path.Dir(filepath)
-	fmt.Printf("    Creating directory: %s\n", dir)
+	indent := "      "
+
+	fmt.Printf("%s- Creating directory: %s\n", indent, dir)
 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %v", dir, err)
@@ -1205,7 +1263,7 @@ func downloadFile(url, filepath string) error {
 		return fmt.Errorf("directory creation failed, path still doesn't exist: %s", dir)
 	}
 
-	fmt.Printf("    Opening file for writing: %s\n", filepath)
+	fmt.Printf("%s- Opening file for writing: %s\n", indent, filepath)
 	out, err := os.Create(filepath)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %v", err)
@@ -1223,7 +1281,7 @@ func downloadFile(url, filepath string) error {
 	}
 
 	size := resp.ContentLength
-	fmt.Printf("    Downloading %s (%d bytes)...\n", path.Base(filepath), size)
+	fmt.Printf("%s- Downloading %s (%d bytes)...\n", indent, path.Base(filepath), size)
 
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
@@ -1269,18 +1327,42 @@ func get_existing_packages(packages_dir string) ([]string, error) {
 		return nil, fmt.Errorf("failed to read packages directory: %v", err)
 	}
 
-	var packages []string
+	type pkg_info struct {
+		name string
+		time time.Time
+	}
+
+	var packages []pkg_info
 	caser := cases.Title(language.English)
+
 	for _, entry := range entries {
 		if entry.IsDir() {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
 			name := entry.Name()
 			name = strings.ReplaceAll(name, "-", " ")
 			name = caser.String(name)
-			packages = append(packages, name)
+
+			packages = append(packages, pkg_info{
+				name: name,
+				time: info.ModTime(),
+			})
 		}
 	}
 
-	return packages, nil
+	sort.Slice(packages, func(i, j int) bool {
+		return packages[i].time.After(packages[j].time)
+	})
+
+	var result []string
+	for _, pkg := range packages {
+		result = append(result, pkg.name)
+	}
+
+	return result, nil
 }
 
 func sanitize_package_name(name string) string {
@@ -1328,4 +1410,55 @@ func save_config(packages_dir string) error {
 	}
 
 	return os.WriteFile(config_path, data, 0644)
+}
+
+func get_recent_packages(packages_dir string, count int) ([]string, error) {
+	if _, err := os.Stat(packages_dir); os.IsNotExist(err) {
+		return nil, nil
+	}
+
+	entries, err := os.ReadDir(packages_dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read packages directory: %v", err)
+	}
+
+	type pkg_info struct {
+		name string
+		time time.Time
+	}
+
+	var packages []pkg_info
+	caser := cases.Title(language.English)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			name := entry.Name()
+			name = strings.ReplaceAll(name, "-", " ")
+			name = caser.String(name)
+
+			packages = append(packages, pkg_info{
+				name: name,
+				time: info.ModTime(),
+			})
+		}
+	}
+
+	sort.Slice(packages, func(i, j int) bool {
+		return packages[i].time.After(packages[j].time)
+	})
+
+	var recent []string
+	for i, pkg := range packages {
+		if i >= count {
+			break
+		}
+		recent = append(recent, pkg.name)
+	}
+
+	return recent, nil
 }
